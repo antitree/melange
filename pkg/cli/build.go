@@ -30,6 +30,7 @@ import (
 	"chainguard.dev/melange/pkg/container"
 	"chainguard.dev/melange/pkg/container/docker"
 	"chainguard.dev/melange/pkg/linter"
+	"chainguard.dev/melange/pkg/seccomp"
 	"github.com/chainguard-dev/clog"
 	"github.com/go-git/go-git/v5"
 	"github.com/spf13/cobra"
@@ -79,6 +80,7 @@ func buildCmd() *cobra.Command {
 	var configFileGitRepoURL string
 	var configFileLicense string
 	var generateProvenance bool
+	var enableSeccomp bool
 
 	var traceFile string
 
@@ -119,6 +121,24 @@ func buildCmd() *cobra.Command {
 				tctx, span := otel.Tracer("melange").Start(ctx, "build")
 				defer span.End()
 				ctx = tctx
+			}
+
+			// Initialize seccomp monitoring if enabled
+			if enableSeccomp {
+				// Create a standard slog.Logger for seccomp
+				slogger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+				monitor := seccomp.NewMonitor(slogger)
+				config := seccomp.Config{
+					Enabled:         true,
+					LogDangerous:    true,
+					FailOnViolation: false,
+				}
+
+				if err := monitor.EnableMonitoring(config); err != nil {
+					return fmt.Errorf("failed to enable seccomp monitoring: %w", err)
+				}
+
+				log.Info("Seccomp monitoring enabled for build process")
 			}
 
 			r, err := getRunner(ctx, runner, remove)
@@ -260,6 +280,7 @@ func buildCmd() *cobra.Command {
 	cmd.Flags().StringVar(&configFileGitRepoURL, "git-repo-url", "", "URL of the git repository containing the build config file (defaults to detecting from configured git remotes)")
 	cmd.Flags().StringVar(&configFileLicense, "license", "NOASSERTION", "license to use for the build config file itself")
 	cmd.Flags().BoolVar(&generateProvenance, "generate-provenance", false, "generate SLSA provenance for builds (included in a separate .attest.tar.gz file next to the APK)")
+	cmd.Flags().BoolVar(&enableSeccomp, "seccomp-mode", false, "enable seccomp-based syscall monitoring for build processes (linux/amd64 only)")
 
 	_ = cmd.Flags().Bool("fail-on-lint-warning", false, "DEPRECATED: DO NOT USE")
 	_ = cmd.Flags().MarkDeprecated("fail-on-lint-warning", "use --lint-require and --lint-warn instead")
