@@ -1227,7 +1227,8 @@ func (b *Build) retrieveWorkspace(ctx context.Context, fs apkofs.FullFS) error {
 		// Remove the leading "./" from LICENSE files in QEMU workspaces
 		hdr.Name = strings.TrimPrefix(hdr.Name, "./")
 
-		// Validate the path to prevent path traversal attacks (CVE-PENDING: GHSA-qxx2-7h4c-83f4)
+		// Validate the tar entry name to prevent path traversal attacks (CVE-PENDING: GHSA-qxx2-7h4c-83f4)
+		// This validation applies to ALL entry types: directories, regular files, symlinks, and hardlinks
 		if err := isValidPath(hdr.Name, b.WorkspaceDir); err != nil {
 			return fmt.Errorf("invalid tar entry path %q: %w", hdr.Name, err)
 		}
@@ -1281,6 +1282,7 @@ func (b *Build) retrieveWorkspace(ctx context.Context, fs apkofs.FullFS) error {
 
 		case tar.TypeSymlink:
 			// Validate symlink target to prevent symlink attacks (CVE-PENDING: GHSA-qxx2-7h4c-83f4)
+			// Note: hdr.Name was already validated above; this validates the symlink destination
 			if err := isValidPath(hdr.Linkname, b.WorkspaceDir); err != nil {
 				return fmt.Errorf("invalid symlink target %q -> %q: %w", hdr.Name, hdr.Linkname, err)
 			}
@@ -1295,6 +1297,7 @@ func (b *Build) retrieveWorkspace(ctx context.Context, fs apkofs.FullFS) error {
 
 		case tar.TypeLink:
 			// Validate hardlink target to prevent link attacks (CVE-PENDING: GHSA-qxx2-7h4c-83f4)
+			// Note: hdr.Name was already validated above; this validates the hardlink destination
 			if err := isValidPath(hdr.Linkname, b.WorkspaceDir); err != nil {
 				return fmt.Errorf("invalid hardlink target %q -> %q: %w", hdr.Name, hdr.Linkname, err)
 			}
