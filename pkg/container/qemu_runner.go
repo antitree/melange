@@ -926,6 +926,64 @@ func createMicroVM(ctx context.Context, cfg *Config) error {
 	// qemu-system-x86_64 or qemu-system-aarch64...
 	// #nosec G204 - Architecture is from validated configuration, not user input
 	qemuCmd := exec.CommandContext(ctx, fmt.Sprintf("qemu-system-%s", cfg.Arch.ToAPK()), baseargs...)
+	// QEMU_RUNAS_UID: optionally run the QEMU child process under a non-root
+	// uid. SLIRP performs userspace NAT inside the QEMU process; outbound
+	// guest packets are emitted as sockets owned by the QEMU process. By
+	// running QEMU under a known uid, an operator can install a netfilter
+	// rule (e.g., `iptables -A OUTPUT -m owner --uid-owner $UID -d
+	// 169.254.169.254 -j DROP`) that selectively blocks the guest's reach
+	// to specific destinations such as the cloud instance metadata server,
+	// while allowing the build entrypoint (running as root) and other pod
+	// processes unrestricted access for legitimate uses (e.g., uploading
+	// built packages via Workload Identity tokens).
+	//
+	// This requires the workspace container to retain CAP_SETUID and
+	// CAP_SETGID (in addition to CAP_SETPCAP if you also intend to drop
+	// the inheritable cap set on the child). The default of unset
+	// preserves today's behavior.
+	if uidStr := os.Getenv("QEMU_RUNAS_UID"); uidStr != "" {
+		uid, err := strconv.Atoi(strings.TrimSpace(uidStr))
+		if err != nil || uid < 0 {
+			return fmt.Errorf("invalid QEMU_RUNAS_UID %q: %w", uidStr, err)
+		}
+		gid := uid
+		if gidStr := os.Getenv("QEMU_RUNAS_GID"); gidStr != "" {
+			parsedGid, err := strconv.Atoi(strings.TrimSpace(gidStr))
+			if err != nil || parsedGid < 0 {
+				return fmt.Errorf("invalid QEMU_RUNAS_GID %q: %w", gidStr, err)
+			}
+			gid = parsedGid
+		}
+		qemuCmd.SysProcAttr = &syscall.SysProcAttr{
+			Credential: &syscall.Credential{
+				Uid: uint32(uid),
+				Gid: uint32(gid),
+			},
+		}
+		clog.FromContext(ctx).Infof("qemu: running QEMU child as uid=%d gid=%d (QEMU_RUNAS_UID is set)", uid, gid)
+		// Files created by melange (running as root) default to 0600 / 0700
+		// and won't be readable by the QEMU child. chmod the rootfs tar,
+		// scratch disk, initramfs, and workspace/cache dirs to be readable
+		// (and writable for dirs) so QEMU under uid:gid can use them.
+		// chmod is used rather than chown because chown requires CAP_CHOWN
+		// which the workspace container doesn't have under caps drop ALL;
+		// chmod only needs ownership of the file (which we have as root).
+		chmodTargets := []string{
+			cfg.ImgRef,        // rootfs tar (read)
+			cfg.Disk,          // scratch disk (read+write)
+			cfg.WorkspaceDir,  // 9p workspace export (read+write)
+			cfg.CacheDir,      // 9p cache export (read)
+			cfg.InitramfsPath, // initramfs cpio (read)
+		}
+		for _, path := range chmodTargets {
+			if path == "" {
+				continue
+			}
+			if err := chmodRecursive(path); err != nil {
+				clog.FromContext(ctx).Warnf("qemu: chmod %s failed (continuing): %v", path, err)
+			}
+		}
+	}
 	clog.FromContext(ctx).Infof("qemu: VM resources: arch=%s cpus=%d memory=%dMiB", cfg.Arch.ToAPK(), nproc, mem/1024)
 	clog.FromContext(ctx).Info("qemu: starting VM")
 	clog.FromContext(ctx).Debugf("qemu: executing - %s", strings.Join(qemuCmd.Args, " "))
@@ -2541,6 +2599,41 @@ func parseDNSSearchDomains(input string) ([]string, error) {
 	}
 
 	return domains, nil
+}
+
+// chmodRecursive walks `path` and broadens each entry's mode bits so a
+// non-root QEMU child can read (and traverse / write where required) the
+// files. Used by the QEMU_RUNAS_UID code path. Files become 0644, dirs
+// become 0755 (or 0777 if they are workspace/cache dirs that QEMU writes to).
+func chmodRecursive(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() {
+		// Symlink: skip (the target will be chmodded separately if needed).
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		// Regular file: 0644 is enough for read-only inputs; for the disk
+		// images we want write too, so use 0666.
+		return os.Chmod(path, 0o666)
+	}
+	return filepath.Walk(path, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if fi.IsDir() {
+			return os.Chmod(p, 0o777)
+		}
+		return os.Chmod(p, 0o666)
+	})
 }
 
 // buildDNSSearchNetdevArgs constructs the QEMU netdev dnssearch options string.

@@ -458,6 +458,74 @@ func TestParseDNSSearchDomains(t *testing.T) {
 	}
 }
 
+func TestChmodRecursive_File(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "x")
+	if err := os.WriteFile(f, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := chmodRecursive(f); err != nil {
+		t.Fatalf("chmodRecursive: %v", err)
+	}
+	fi, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o666 {
+		t.Errorf("expected 0666, got %o", fi.Mode().Perm())
+	}
+}
+
+func TestChmodRecursive_Dir(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(sub, "x")
+	if err := os.WriteFile(f, []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := chmodRecursive(dir); err != nil {
+		t.Fatalf("chmodRecursive: %v", err)
+	}
+	dfi, _ := os.Stat(sub)
+	if dfi.Mode().Perm() != 0o777 {
+		t.Errorf("expected dir 0777, got %o", dfi.Mode().Perm())
+	}
+	ffi, _ := os.Stat(f)
+	if ffi.Mode().Perm() != 0o666 {
+		t.Errorf("expected file 0666, got %o", ffi.Mode().Perm())
+	}
+}
+
+func TestChmodRecursive_NonExistent(t *testing.T) {
+	if err := chmodRecursive("/does/not/exist/qbr"); err != nil {
+		t.Errorf("chmodRecursive on non-existent should be nil, got %v", err)
+	}
+}
+
+func TestChmodRecursive_Symlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "tgt")
+	if err := os.WriteFile(target, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "lnk")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	// chmodRecursive on the symlink itself should skip it.
+	if err := chmodRecursive(link); err != nil {
+		t.Errorf("chmodRecursive on symlink should be nil, got %v", err)
+	}
+	// Target's mode should be unchanged (still 0600).
+	fi, _ := os.Stat(target)
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("symlink chmod should not have followed; expected target 0600, got %o", fi.Mode().Perm())
+	}
+}
+
 func TestBuildDNSSearchNetdevArgs(t *testing.T) {
 	tests := []struct {
 		name     string
